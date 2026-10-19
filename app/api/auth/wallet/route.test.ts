@@ -78,16 +78,30 @@ function makeGetRequest(params: Record<string, string> = {}) {
   } as unknown as import("next/server").NextRequest;
 }
 
+function streamFromText(text: string): ReadableStream<Uint8Array> {
+  const encoded = new TextEncoder().encode(text);
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (encoded.byteLength > 0) controller.enqueue(encoded);
+      controller.close();
+    },
+  });
+}
+
 function makePostRequest(
   body: unknown,
   csrfCookie?: string,
   csrfHeader?: string,
 ) {
+  const text =
+    body === "THROW"
+      ? "{"
+      : typeof body === "string"
+        ? body
+        : (JSON.stringify(body) ?? "");
+
   return {
-    json: async () => {
-      if (body === "THROW") throw new Error("parse error");
-      return body;
-    },
+    body: streamFromText(text),
     nextUrl: { pathname: "/api/auth/wallet" },
     headers: {
       get: (name: string) => {
@@ -263,6 +277,23 @@ describe("POST /api/auth/wallet validation", () => {
     const body = (res as any).body;
     expect(body.error.code).toBe("VALIDATION_ERROR");
     expect(body.error.details[0].code).toBe("INVALID_JSON");
+  });
+
+  it("returns 422 EMPTY_BODY when the request body is empty", async () => {
+    const res = await POST(makePostRequest(""));
+    expect(res.status).toBe(422);
+    const body = (res as any).body;
+    expect(body.error.code).toBe("VALIDATION_ERROR");
+    expect(body.error.details[0].code).toBe("EMPTY_BODY");
+  });
+
+  it("returns 413 when a chunked request body exceeds the limit", async () => {
+    const res = await POST(makePostRequest("x".repeat(300 * 1024), "csrf", "csrf"));
+    expect(res.status).toBe(413);
+    const body = (res as any).body;
+    expect(body.error.code).toBe("REQUEST_TOO_LARGE");
+    expect(body.error.message).toContain("262144-byte limit");
+    expect(typeof body.error.request_id).toBe("string");
   });
 
   it("ignores unknown extra fields when the known fields are valid", async () => {
